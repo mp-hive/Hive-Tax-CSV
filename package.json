@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@hiveio/dhive": "^1.3.2"
+  }
+}
