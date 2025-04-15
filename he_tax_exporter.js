@@ -72,6 +72,20 @@ async function fetchTransactionPage(account, symbol, limit = 1000, offset = 0) {
     return response.data;
   } catch (error) {
     const status = error.response ? error.response.status : 'unknown';
+    console.error(`Error fetching page with offset ${offset}: status ${status}`);
+    
+    // Retry once after a longer delay for transient errors
+    if (status === 503 || status === 429 || status === 'unknown') {
+      console.log(`Retrying page with offset ${offset} after a longer delay...`);
+      await delay(DELAY_BETWEEN_REQUESTS * 3);
+      try {
+        const retryResponse = await axios.get(url);
+        return retryResponse.data;
+      } catch (retryError) {
+        throw new Error(`Retry failed! HTTP error! status: ${retryError.response ? retryError.response.status : retryError.message}`);
+      }
+    }
+    
     throw new Error(`HTTP error! status: ${status}`);
   }
 }
@@ -99,13 +113,18 @@ async function fetchTransactionDetails(txId, retryCount = 0) {
       headers: { 'Content-Type': 'application/json' }
     });
     
+    if (!response.data || !response.data.result) {
+      console.error(`No data returned for transaction ${txId}`);
+      return null;
+    }
+    
     return response.data.result;
   } catch (error) {
     const status = error.response ? error.response.status : 'unknown';
     console.error(`Error fetching details for transaction ${txId}: ${error.message}`);
     
     // Retry with exponential backoff if we haven't reached the maximum retries
-    if (retryCount < MAX_RETRIES && (status === 503 || status === 429)) {
+    if (retryCount < MAX_RETRIES && (status === 503 || status === 429 || status === 'unknown')) {
       console.log(`Retrying (${retryCount + 1}/${MAX_RETRIES})...`);
       return fetchTransactionDetails(txId, retryCount + 1);
     }
@@ -118,34 +137,58 @@ async function fetchTransactionDetails(txId, retryCount = 0) {
 /**
  * Deduplicates transactions by transaction ID
  * @param {Array} transactions - Array of transactions
- * @returns {Array} Deduplicated transactions
+ * @returns {Object} Object with deduplicated market and non-market transactions
  */
 function deduplicateTransactions(transactions) {
+  // Create sets to track unique transaction IDs
   const uniqueTxIds = new Set();
-  const uniqueTransactions = [];
+  const uniqueMarketTransactions = [];
+  const uniqueNonMarketTransactions = [];
   let duplicateCount = 0;
   
-  // Filter for buy/sell operations
-  const buyOrSellTransactions = transactions.filter(tx => 
+  // Group transactions by operation type
+  const marketTransactions = transactions.filter(tx => 
     tx.operation === 'market_buy' || tx.operation === 'market_sell'
   );
   
-  console.log(`Found ${buyOrSellTransactions.length} buy/sell operations before deduplication`);
+  const nonMarketTransactions = transactions.filter(tx => 
+    tx.operation !== 'market_buy' && tx.operation !== 'market_sell'
+  );
   
-  // Deduplicate by transaction ID
-  for (const tx of buyOrSellTransactions) {
+  console.log(`Found ${marketTransactions.length} market transactions`);
+  console.log(`Found ${nonMarketTransactions.length} non-market transactions`);
+  
+  // Deduplicate market transactions
+  for (const tx of marketTransactions) {
     if (!uniqueTxIds.has(tx.transactionId)) {
       uniqueTxIds.add(tx.transactionId);
-      uniqueTransactions.push(tx);
+      uniqueMarketTransactions.push(tx);
+    } else {
+      duplicateCount++;
+    }
+  }
+  
+  // Reset the set for non-market transactions
+  uniqueTxIds.clear();
+  
+  // Deduplicate non-market transactions
+  for (const tx of nonMarketTransactions) {
+    if (!uniqueTxIds.has(tx.transactionId)) {
+      uniqueTxIds.add(tx.transactionId);
+      uniqueNonMarketTransactions.push(tx);
     } else {
       duplicateCount++;
     }
   }
   
   console.log(`Removed ${duplicateCount} duplicate transactions`);
-  console.log(`Remaining ${uniqueTransactions.length} unique transactions`);
+  console.log(`Remaining ${uniqueMarketTransactions.length} unique market transactions`);
+  console.log(`Remaining ${uniqueNonMarketTransactions.length} unique non-market transactions`);
   
-  return uniqueTransactions;
+  return {
+    marketTransactions: uniqueMarketTransactions,
+    nonMarketTransactions: uniqueNonMarketTransactions
+  };
 }
 
 /**
@@ -157,15 +200,15 @@ async function processTransactionsInBatches(transactions) {
   const enhancedTransactions = [];
   
   // Deduplicate transactions by transaction ID
-  const uniqueMarketTransactions = deduplicateTransactions(transactions);
+  const { marketTransactions, nonMarketTransactions } = deduplicateTransactions(transactions);
   
-  // Split transactions into batches
+  // Split market transactions into batches
   const batches = [];
-  for (let i = 0; i < uniqueMarketTransactions.length; i += BATCH_SIZE) {
-    batches.push(uniqueMarketTransactions.slice(i, i + BATCH_SIZE));
+  for (let i = 0; i < marketTransactions.length; i += BATCH_SIZE) {
+    batches.push(marketTransactions.slice(i, i + BATCH_SIZE));
   }
   
-  console.log(`Split ${uniqueMarketTransactions.length} market transactions into ${batches.length} batches`);
+  console.log(`Split ${marketTransactions.length} market transactions into ${batches.length} batches`);
   
   // Track which transaction IDs we've processed
   const processedTxIds = new Set();
@@ -190,17 +233,21 @@ async function processTransactionsInBatches(transactions) {
       const details = await fetchTransactionDetails(tx.transactionId);
       
       if (details) {
-        // Parse the logs JSON string if it's a string
-        details.logs = typeof details.logs === 'string' 
-          ? JSON.parse(details.logs) 
-          : details.logs;
-        
-        // Parse the payload JSON string if it's a string
-        details.payload = typeof details.payload === 'string' 
-          ? JSON.parse(details.payload) 
-          : details.payload;
+        try {
+          // Parse the logs JSON string if it's a string
+          details.logs = typeof details.logs === 'string' 
+            ? JSON.parse(details.logs) 
+            : details.logs;
           
-        enhancedTransactions.push({ ...tx, details });
+          // Parse the payload JSON string if it's a string
+          details.payload = typeof details.payload === 'string' 
+            ? JSON.parse(details.payload) 
+            : details.payload;
+            
+          enhancedTransactions.push({ ...tx, details });
+        } catch (error) {
+          console.error(`Error parsing JSON for transaction ${tx.transactionId}:`, error);
+        }
       } else {
         // Skip transactions where we couldn't get details
         console.log(`Skipping transaction ${tx.transactionId} due to missing details`);
@@ -214,11 +261,7 @@ async function processTransactionsInBatches(transactions) {
     }
   }
   
-  // Add non-market transactions (rewards, etc.)
-  const nonMarketTransactions = transactions.filter(tx => 
-    !tx.operation.startsWith('market_') || 
-    (tx.operation !== 'market_buy' && tx.operation !== 'market_sell')
-  );
+  // Add non-market transactions
   enhancedTransactions.push(...nonMarketTransactions);
   
   return enhancedTransactions;
@@ -246,21 +289,36 @@ async function fetchYearTransactions(account, symbol, year) {
     const pageSize = 1000;
     let keepFetching = true;
     let oldestTxTimestamp = Infinity;
+    let noNewTransactions = false;
     
     while (keepFetching) {
       const transactions = await fetchTransactionPage(account, symbol, pageSize, offset);
       
       if (transactions.length === 0) {
+        console.log('No more transactions returned from API');
+        break;
+      }
+      
+      // Check if we got any new transactions we haven't seen yet
+      const newTransactions = transactions.filter(tx => 
+        !allTransactions.some(existingTx => existingTx.transactionId === tx.transactionId)
+      );
+      
+      if (newTransactions.length === 0) {
+        console.log('No new transactions in this page, stopping');
+        noNewTransactions = true;
         break;
       }
       
       oldestTxTimestamp = transactions[transactions.length - 1].timestamp;
       console.log(`Oldest transaction in current page: ${new Date(oldestTxTimestamp * 1000).toISOString().split('T')[0]}`);
+      console.log(`Found ${newTransactions.length} new transactions in this page`);
       
-      allTransactions = [...allTransactions, ...transactions];
+      allTransactions = [...allTransactions, ...newTransactions];
       
-      // Stop if we've gone past our start date or if we've reached a reasonable limit
-      if (oldestTxTimestamp < startTimestamp || offset >= 5000) {
+      // Stop if we've gone past our start date
+      if (oldestTxTimestamp < startTimestamp) {
+        console.log('Reached transactions before the specified year, stopping');
         keepFetching = false;
       }
       
@@ -307,12 +365,16 @@ function processTradeTransactions(transactions) {
     
     // Skip transactions with missing or invalid details
     if (!tx.details.logs || !tx.details.logs.events || !tx.details.payload) {
-      console.log(`Skipping transaction ${tx.transactionId} due to missing details`);
+      console.log(`Skipping transaction ${tx.transactionId} due to incomplete details`);
       continue;
     }
     
+    // Get transaction ID - this is critical for the notat field
+    const txId = tx.transactionId;
+    console.log(`Processing transaction ID: ${txId}`); // Debug log
+    
     // Add to processed IDs set for logging
-    processedTxIds.add(tx.transactionId);
+    processedTxIds.add(txId);
     
     const timestamp = formatTimestamp(tx.timestamp);
     const events = tx.details.logs.events || [];
@@ -334,11 +396,6 @@ function processTradeTransactions(transactions) {
         e.data.to === HIVE_ACCOUNT && e.data.symbol === TOKEN_SYMBOL
       );
       
-      // Extract all SWAP.HIVE transfers from market to others (what was paid to sellers)
-      const hiveTradedToSellers = transferEvents.filter(e => 
-        e.data.from === 'market' && e.data.to !== HIVE_ACCOUNT && e.data.symbol === 'SWAP.HIVE'
-      );
-      
       // Handle case where we can identify actual trades
       if (hiveSent.length > 0 && tokenReceived.length > 0) {
         // Calculate total values
@@ -347,7 +404,7 @@ function processTradeTransactions(transactions) {
         const totalHiveTraded = totalHiveSent - totalHiveRefunded;
         const totalTokensReceived = tokenReceived.reduce((sum, e) => sum + parseFloat(e.data.quantity), 0);
         
-        console.log(`Buy transaction ${tx.transactionId}:`);
+        console.log(`Buy transaction ${txId}:`);
         console.log(`- Total HIVE sent: ${totalHiveSent.toFixed(8)}`);
         console.log(`- Total HIVE refunded: ${totalHiveRefunded.toFixed(8)}`);
         console.log(`- Net HIVE traded: ${totalHiveTraded.toFixed(8)}`);
@@ -372,8 +429,9 @@ function processTradeTransactions(transactions) {
             continue;
           }
           
-          tradeTransactions.push({
-            timestamp,
+          // Create transaction object and explicitly set notat to txId
+          const tradeEntry = {
+            timestamp: timestamp,
             type: 'Handel',
             innAmount: tokenAmount.toFixed(8),
             innCurrency: TOKEN_SYMBOL,
@@ -382,13 +440,19 @@ function processTradeTransactions(transactions) {
             gebyr: '',
             gebyrCurrency: '',
             marked: 'Hive-Engine',
-            notat: ''
-          });
+            notat: txId
+          };
           
-          console.log(`Added trade: ${tokenAmount.toFixed(8)} ${TOKEN_SYMBOL} for ${hiveAmount.toFixed(8)} HIVE`);
+          // Verify the notat field is set correctly
+          console.log(`Setting notat for trade entry to: ${txId}`);
+          console.log(`Trade entry notat field value: ${tradeEntry.notat}`);
+          
+          tradeTransactions.push(tradeEntry);
+          
+          console.log(`Added trade: ${tokenAmount.toFixed(8)} ${TOKEN_SYMBOL} for ${hiveAmount.toFixed(8)} HIVE - TxID: ${txId}`);
         }
       } else {
-        console.log(`Skipping buy transaction ${tx.transactionId}: No valid transfer pairs found`);
+        console.log(`Skipping buy transaction ${txId}: No valid transfer pairs found`);
       }
     } 
     else if (tx.operation === 'market_sell') {
@@ -415,17 +479,17 @@ function processTradeTransactions(transactions) {
         const totalTokensTraded = totalTokensSent - totalTokensRefunded;
         const totalHiveReceived = hiveReceived.reduce((sum, e) => sum + parseFloat(e.data.quantity), 0);
         
-        console.log(`Sell transaction ${tx.transactionId}:`);
+        console.log(`Sell transaction ${txId}:`);
         console.log(`- Total ${TOKEN_SYMBOL} sent: ${totalTokensSent.toFixed(8)}`);
         console.log(`- Total ${TOKEN_SYMBOL} refunded: ${totalTokensRefunded.toFixed(8)}`);
         console.log(`- Net ${TOKEN_SYMBOL} traded: ${totalTokensTraded.toFixed(8)}`);
         console.log(`- Total HIVE received: ${totalHiveReceived.toFixed(8)}`);
         
         // Create a single entry for the entire sell transaction
-        // This is different from buy transactions because sell transactions are typically simpler
         if (totalTokensTraded > MIN_TRANSACTION_VALUE && totalHiveReceived > MIN_TRANSACTION_VALUE) {
-          tradeTransactions.push({
-            timestamp,
+          // Create transaction object and explicitly set notat to txId
+          const tradeEntry = {
+            timestamp: timestamp,
             type: 'Handel',
             innAmount: totalHiveReceived.toFixed(8),
             innCurrency: 'HIVE',
@@ -434,18 +498,30 @@ function processTradeTransactions(transactions) {
             gebyr: '',
             gebyrCurrency: '',
             marked: 'Hive-Engine',
-            notat: ''
-          });
+            notat: txId
+          };
           
-          console.log(`Added trade: ${totalHiveReceived.toFixed(8)} HIVE for ${totalTokensTraded.toFixed(8)} ${TOKEN_SYMBOL}`);
+          // Verify the notat field is set correctly
+          console.log(`Setting notat for trade entry to: ${txId}`);
+          console.log(`Trade entry notat field value: ${tradeEntry.notat}`);
+          
+          tradeTransactions.push(tradeEntry);
+          
+          console.log(`Added trade: ${totalHiveReceived.toFixed(8)} HIVE for ${totalTokensTraded.toFixed(8)} ${TOKEN_SYMBOL} - TxID: ${txId}`);
         } else {
           console.log(`Skipping small sell trade: ${totalHiveReceived.toFixed(8)} HIVE for ${totalTokensTraded.toFixed(8)} ${TOKEN_SYMBOL}`);
         }
       } else {
-        console.log(`Skipping sell transaction ${tx.transactionId}: No valid transfer pairs found`);
+        console.log(`Skipping sell transaction ${txId}: No valid transfer pairs found`);
       }
     }
   }
+  
+  // Debug log all trade transactions to verify notat fields
+  console.log(`\nVerifying notat fields for all ${tradeTransactions.length} trade transactions:`);
+  tradeTransactions.forEach((trade, index) => {
+    console.log(`Trade ${index + 1} notat: "${trade.notat}"`);
+  });
   
   console.log(`Processed ${processedTxIds.size} unique transaction IDs, extracted ${tradeTransactions.length} trades`);
   
@@ -461,15 +537,24 @@ function processRewardTransactions(transactions) {
   const rewardTransactions = [];
   
   for (const tx of transactions) {
+    // We're interested in tokens_issue and tokens_stake where HIVE_ACCOUNT is the recipient
+    // but not the sender
     if (tx.operation === 'tokens_issue' || tx.operation === 'tokens_stake') {
       // Only include transactions where HIVE_ACCOUNT is the recipient and not the sender
       if (tx.to === HIVE_ACCOUNT && tx.from !== HIVE_ACCOUNT) {
         const timestamp = formatTimestamp(tx.timestamp);
+        const amount = parseFloat(tx.quantity || 0);
+        
+        // Skip very small transactions
+        if (amount < MIN_TRANSACTION_VALUE) {
+          console.log(`Skipping small reward: ${amount.toFixed(8)} ${TOKEN_SYMBOL} from ${tx.from}`);
+          continue;
+        }
         
         rewardTransactions.push({
           timestamp,
           type: 'Inntekt',
-          innAmount: tx.quantity || '',
+          innAmount: amount.toFixed(8),
           innCurrency: TOKEN_SYMBOL,
           utAmount: '',
           utCurrency: '',
@@ -478,9 +563,13 @@ function processRewardTransactions(transactions) {
           marked: 'Hive-Engine',
           notat: tx.from || ''
         });
+        
+        console.log(`Added reward: ${amount.toFixed(8)} ${TOKEN_SYMBOL} from ${tx.from}`);
       }
     }
   }
+  
+  console.log(`Processed ${rewardTransactions.length} reward transactions`);
   
   return rewardTransactions;
 }
@@ -491,24 +580,39 @@ function processRewardTransactions(transactions) {
  * @returns {string} CSV content
  */
 function generateCSV(transactions) {
+  // First verify that all transactions have a notat field
+  console.log(`\nVerifying all transactions have notat field before CSV generation:`);
+  transactions.forEach((tx, index) => {
+    console.log(`Transaction ${index + 1} notat: "${tx.notat || 'MISSING'}"`);
+  });
+  
   const headers = [
     'Tidspunkt', 'Type', 'Inn', 'Inn-Valuta', 
     'Ut', 'Ut-Valuta', 'Gebyr', 'Gebyr-Valuta', 
     'Marked', 'Notat'
   ].join(',');
   
-  const rows = transactions.map(tx => [
-    tx.timestamp,
-    tx.type,
-    tx.innAmount,
-    tx.innCurrency,
-    tx.utAmount,
-    tx.utCurrency,
-    tx.gebyr,
-    tx.gebyrCurrency,
-    tx.marked,
-    tx.notat
-  ].join(','));
+  const rows = transactions.map((tx, index) => {
+    // Debug log each transaction as we convert to CSV
+    console.log(`Converting transaction ${index + 1} to CSV row, notat: "${tx.notat || 'MISSING'}"`);
+    
+    // Ensure each field has a value, even if empty
+    const row = [
+      tx.timestamp || '',
+      tx.type || '',
+      tx.innAmount || '',
+      tx.innCurrency || '',
+      tx.utAmount || '',
+      tx.utCurrency || '',
+      tx.gebyr || '',
+      tx.gebyrCurrency || '',
+      tx.marked || '',
+      tx.notat || '' // Make sure notat is never undefined or null
+    ].join(',');
+    
+    console.log(`CSV row: ${row}`);
+    return row;
+  });
   
   return [headers, ...rows].join('\n');
 }
