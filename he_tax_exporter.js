@@ -2,7 +2,7 @@ const fs = require('fs');
 const axios = require('axios');
 
 // Configuration
-const HIVE_ACCOUNT = 'mightpossibly';
+const HIVE_ACCOUNT = 'your-hive-account';
 const YEAR = '2024';
 const TOKEN_SYMBOL = 'LEO';
 
