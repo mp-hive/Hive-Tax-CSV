@@ -19,7 +19,9 @@ const YEAR = '2024';
 
 Then run hive_tax_exporter.js. It will scan the blockchain and produce a csv file containing all relevant taxable transactions
 
-`node hive_tax_exporter.js`
+```
+node hive_tax_exporter.js
+```
 
 ---
 
@@ -36,7 +38,9 @@ Then run hive_tax_exporter.js. It will scan the blockchain and produce two csv's
 - one containing all your trades for the selected token
 - one containing all your reward and transfer-transactions for the selected token symbol
 
-`node he_tax_exporter.js`
+```
+node he_tax_exporter.js
+```
 
 ---
 
@@ -49,3 +53,7 @@ const YEAR = '2024';
 const TOKEN_SYMBOL = 'LEO';
 ```
 The script will produce two files, one with a standard csv containing all tx data, + one file with the raw json output.
+
+```
+node he_fetch_raw_transactions.js
+```
