@@ -4,7 +4,7 @@ const axios = require('axios');
 // Configuration
 const HIVE_ACCOUNT = 'mightpossibly';
 const YEAR = '2024';
-const TOKEN_SYMBOL = 'LEO';
+const TOKEN_SYMBOL = 'SPS';
 
 // Calculate start and end timestamps for the year
 const startDate = new Date(`${YEAR}-01-01T00:00:00Z`);
