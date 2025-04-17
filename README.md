@@ -6,6 +6,8 @@ cd Hive-Tax-CSV
 npm install
 ```
 
+---
+
 ### How to use
 #### Fetch Hive Layer-1 transactions
 Edit `hive_tax_exporter.js`. Near the top of the file, insert your account name and the tax year you wish to fetch transactions from:
@@ -18,6 +20,8 @@ const YEAR = '2024';
 Then run hive_tax_exporter.js. It will scan the blockchain and produce a csv file containing all relevant taxable transactions
 
 `node hive_tax_exporter.js`
+
+---
 
 #### Fetch Hive-Engine Layer-2 transactions
 Edit `he_tax_exporter.js`. Near the top of the file, insert your account name and the tax year you wish to fetch transactions from:
@@ -34,7 +38,9 @@ Then run hive_tax_exporter.js. It will scan the blockchain and produce two csv's
 
 `node he_tax_exporter.js`
 
-#### Alternative: Fetch HE raw transactions
+---
+
+#### Alternate Option: Fetch HE raw transactions
 Edit `he_fetch_raw_transactions.js`. Near the top of the file, insert your account name and the tax year you wish to fetch transactions from:
 
 ```
