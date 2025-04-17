@@ -1,8 +1,8 @@
 const { Client } = require('@hiveio/dhive');
 const fs = require('fs');
 
-// Configuration variables - easily adjustable
-const HIVE_ACCOUNT = 'mightpossibly';
+// Configuration variables
+const HIVE_ACCOUNT = 'your-hive-account';
 const YEAR = '2024';
 
 // Initialize Hive client with multiple nodes for redundancy
